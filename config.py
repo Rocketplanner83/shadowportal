@@ -26,6 +26,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 class Settings:
     TRUENAS_URL: Optional[str]
     TRUENAS_API_KEY: Optional[str]
+    TRUENAS_WS_URL_OVERRIDE: Optional[str] = None
     TRUENAS_WS_PATH: str = "/websocket"
     TRUENAS_VERIFY_TLS: bool = False
 
@@ -39,6 +40,9 @@ class Settings:
 
     @property
     def TRUENAS_WS_URL(self) -> str:
+        if self.TRUENAS_WS_URL_OVERRIDE:
+            return self.TRUENAS_WS_URL_OVERRIDE
+
         if not self.TRUENAS_URL:
             raise ValueError("TRUENAS_URL is not configured")
 
@@ -61,7 +65,9 @@ class Settings:
 
 def load_settings() -> Settings:
     url = _env("TRUENAS_URL")
-    api_key = _env("TRUENAS_API_KEY")
+    api_key = os.getenv("TRUENAS_API_KEY", "").strip()
+    ws_url = _env("TRUENAS_WS_URL")
+    ws_path = _env("TRUENAS_WS_PATH", "/websocket") or "/websocket"
     verify_tls = _env_bool("TRUENAS_VERIFY_TLS", default=False)
 
     secret = _env("FLASK_SECRET_KEY", "change-me") or "change-me"
@@ -79,6 +85,8 @@ def load_settings() -> Settings:
     return Settings(
         TRUENAS_URL=url,
         TRUENAS_API_KEY=api_key,
+        TRUENAS_WS_URL_OVERRIDE=ws_url,
+        TRUENAS_WS_PATH=ws_path,
         TRUENAS_VERIFY_TLS=verify_tls,
         FLASK_SECRET_KEY=secret,
         ADMIN_PASSWORD_HASH=admin_hash,

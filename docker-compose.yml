@@ -10,9 +10,9 @@ services:
       PORT: "8799"
 
       # Hard-set TrueNAS connection (no shell substitution)
-      TRUENAS_URL: "http://127.0.0.1:6000"
+      TRUENAS_URL: "http://127.0.0.1"
       TRUENAS_WS_URL: "ws://127.0.0.1:6000/websocket"
-      TRUENAS_API_KEY: "3-PTqr1GdB7hkyWftm1nsNNeiaLa5Muxde91iTIeHNrGMOg9FoywSSPDRMeb1B3s6dY"
+      TRUENAS_API_KEY: "${TRUENAS_API_KEY}"
       TRUENAS_VERIFY_TLS: "false"
 
       CACHE_DEFAULT_TIMEOUT: "30"

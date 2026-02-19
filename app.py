@@ -2,11 +2,11 @@ import json
 import os
 from datetime import datetime, timezone
 from functools import wraps
-from flask import Flask, render_template, request, redirect, url_for, session, Response, jsonify, send_file, abort
+from flask import Flask, render_template, request, redirect, url_for, session, Response, jsonify, send_file, abort, g
 from flask_caching import Cache
 
 from config import settings
-from utils.zfs import ZfsError, validate_restore_paths
+from utils.zfs import ZfsError, validate_restore_paths, TrueNASClient
 from services.zfs_service import ZfsService
 
 # single service instance used by routes
@@ -36,8 +36,8 @@ app.config["CACHE_DEFAULT_TIMEOUT"] = int(os.getenv("CACHE_DEFAULT_TIMEOUT", 60)
 cache = Cache(app)
 
 
-def validate_truenas_connectivity():
-    zfs_service.validate_connectivity()
+def validate_truenas_connectivity(client: TrueNASClient):
+    zfs_service.validate_connectivity(client)
 
 
 def audit_log(action: str, details: dict):
@@ -98,6 +98,23 @@ def require_truenas(fn):
         if not is_configured():
             return render_template("config_error.html"), 503
         return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def with_truenas_client(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        client = TrueNASClient()
+        try:
+            client.connect()
+            g.truenas_client = client
+            return fn(*args, **kwargs)
+        finally:
+            try:
+                client.close()
+            finally:
+                g.pop("truenas_client", None)
 
     return wrapper
 
@@ -168,14 +185,15 @@ def login():
 
 
 @app.route("/health")
+@require_truenas
+@with_truenas_client
 def health():
     """Cheap health probe for reverse proxies and quick debugging."""
     try:
-        zfs_service.validate_connectivity()
+        zfs_service.validate_connectivity(g.truenas_client)
         return {"ok": True, "truenas": "ok"}
     except Exception as e:
         return {"ok": False, "truenas": "error", "error": str(e)}, 503
-
 
 
 @app.route("/logout")
@@ -193,9 +211,10 @@ def handle_zfs_error(e):
 @app.route("/")
 @require_truenas
 @require_login
+@with_truenas_client
 def index():
-    datasets = zfs_service.list_datasets()
-    pools = zfs_service.build_pool_tree(datasets)
+    datasets = zfs_service.list_datasets(client=g.truenas_client)
+    pools = zfs_service.build_pool_tree(datasets, client=g.truenas_client)
 
     return render_template(
         "index.html",
@@ -208,12 +227,13 @@ def index():
 @app.route("/dataset")
 @require_truenas
 @require_login
+@with_truenas_client
 def dataset_view():
     dataset = request.args.get("name")
     if not dataset:
         abort(400)
 
-    snapshots = zfs_service.list_snapshots(dataset)
+    snapshots = zfs_service.list_snapshots(dataset, client=g.truenas_client)
     snapshots.sort(
         key=lambda x: x.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
@@ -234,9 +254,10 @@ def dataset_view():
 @require_truenas
 @require_login
 @require_admin
+@with_truenas_client
 def rollback(dataset, snapshot):
     audit_log("rollback", {"dataset": dataset, "snapshot": snapshot})
-    result = zfs_service.rollback_snapshot(dataset, snapshot)
+    result = zfs_service.rollback_snapshot(dataset, snapshot, client=g.truenas_client)
     return {"ok": True, "result": result}
 
 
@@ -244,24 +265,26 @@ def rollback(dataset, snapshot):
 @require_truenas
 @require_login
 @require_admin
+@with_truenas_client
 def clone(dataset, snapshot):
     target = request.form.get("target")
     if not target:
         return {"ok": False, "error": "Clone target required"}, 400
     audit_log("clone", {"dataset": dataset, "snapshot": snapshot, "target": target})
-    result = zfs_service.clone_snapshot(dataset, snapshot, target)
+    result = zfs_service.clone_snapshot(dataset, snapshot, target, client=g.truenas_client)
     return {"ok": True, "result": result}
 
 
 @app.route("/diff/<path:dataset>")
 @require_truenas
 @require_login
+@with_truenas_client
 def diff_view(dataset):
     a = request.args.get("a")
     b = request.args.get("b")
     if not a or not b:
         return "Missing a/b", 400
-    d = zfs_service.snapshot_diff(dataset, a, b)
+    d = zfs_service.snapshot_diff(dataset, a, b, client=g.truenas_client)
     audit_log("diff", {"dataset": dataset, "a": a, "b": b})
     return render_template("diff.html", diff=d, dataset=dataset, a=a, b=b)
 
@@ -288,6 +311,7 @@ def audit_view():
 @app.route("/browse")
 @require_truenas
 @require_login
+@with_truenas_client
 def browse_snapshot():
     dataset = request.args.get("dataset")
     snapshot = request.args.get("snapshot")
@@ -299,22 +323,27 @@ def browse_snapshot():
     if not dataset or not snapshot:
         return render_template("error.html", message="Missing dataset or snapshot"), 400
 
-    import os
-
-    print("DEBUG DATASET:", dataset)
-    print("DEBUG SNAPSHOT:", snapshot)
-    print("DEBUG SUBPATH:", subpath)
-
-    base = f"/data/{dataset}/.zfs/snapshot/{snapshot}"
-    print("DEBUG BASE PATH:", base)
-    print("DEBUG BASE EXISTS:", os.path.exists(base))
-    print("DEBUG BASE ISDIR:", os.path.isdir(base))
-
+    import posixpath
     from urllib.parse import unquote_plus
-    subpath = unquote_plus(subpath)
+    decoded_subpath = unquote_plus(subpath or "")
+    if decoded_subpath in {"", "/", "."}:
+        current_path = ""
+    else:
+        current_path = posixpath.normpath(decoded_subpath.strip("/"))
+        if current_path in {".", ".."} or current_path.startswith("../"):
+            return render_template("error.html", message="Invalid snapshot subpath"), 400
+
+    breadcrumbs = []
+    if current_path:
+        accum = []
+        for part in current_path.split("/"):
+            if not part:
+                continue
+            accum.append(part)
+            breadcrumbs.append((part, "/".join(accum)))
 
     try:
-        entries = zfs_service.list_snapshot_files(dataset, snapshot, subpath)
+        entries = zfs_service.list_snapshot_files(dataset, snapshot, current_path, client=g.truenas_client)
     except Exception as e:
         app.logger.exception("Browse snapshot failed")
         return render_template("error.html", message=str(e)), 400
@@ -323,8 +352,11 @@ def browse_snapshot():
         "snapshot_browser.html",
         dataset=dataset,
         snapshot=snapshot,
-        subpath=subpath,
+        subpath=current_path,
+        current_path=current_path,
+        breadcrumbs=breadcrumbs,
         entries=entries,
+        role=session.get("role"),
     )
 
 
@@ -345,6 +377,7 @@ def download_snapshot_file(dataset, snapshot, filepath):
 @require_truenas
 @require_login
 @require_admin
+@with_truenas_client
 def restore_file():
     data = request.get_json(silent=True) or {}
     dataset = data.get("dataset")
@@ -363,7 +396,14 @@ def restore_file():
         return jsonify({"ok": False, "error": str(e)}), 400
 
     try:
-        job_id = zfs_service.restore_path(dataset, snapshot, path, dest, overwrite=bool(data.get("overwrite", False)))
+        job_id = zfs_service.restore_path(
+            dataset,
+            snapshot,
+            path,
+            dest,
+            overwrite=bool(data.get("overwrite", False)),
+            client=g.truenas_client,
+        )
     except Exception as e:
         app.logger.exception("restore_path failed")
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -378,12 +418,14 @@ def restore_file():
 def job_events(job_id):
     def gen():
         from uuid import uuid4
-        client = zfs_service.open_client()
+
+        client = TrueNASClient()
+        client.connect()
         sub_id = str(uuid4())
         try:
             client.subscribe("core.get_jobs", sub_id)
 
-            j = zfs_service.get_job(job_id)
+            j = zfs_service.get_job(job_id, client=client)
             initial_state = (j or {}).get("state", "UNKNOWN")
             payload = json.dumps({
                 "id": job_id,
@@ -425,9 +467,10 @@ def job_events(job_id):
 @app.route("/api/jobs/<int:job_id>")
 @require_truenas
 @require_login
+@with_truenas_client
 def api_get_job(job_id: int):
     try:
-        raw = zfs_service.get_job(job_id)
+        raw = zfs_service.get_job(job_id, client=g.truenas_client)
         job = None
         if isinstance(raw, list) and raw:
             job = raw[0]

@@ -50,9 +50,8 @@ def build_pool_tree(datasets):
 class ZfsService:
     """High-level ZFS/TrueNAS service wrapper used by the application.
 
-    This class delegates to the existing low-level functions in `utils.zfs`
-    and provides a small helper to open a connected TrueNAS client when
-    the caller needs to subscribe/receive messages.
+    This class delegates to low-level functions in `utils.zfs` and expects
+    the caller to provide an already-connected request-scoped client.
     """
 
     def __init__(self) -> None:
@@ -60,24 +59,26 @@ class ZfsService:
         self._snapshot_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._snapshot_ttl = 30.0
 
-    def open_client(self) -> lowlevel.TrueNASMiddlewareClient:
-        c = lowlevel.TrueNASMiddlewareClient()
-        c.connect()
-        return c
+    def _require_client(self, client: lowlevel.TrueNASClient | None) -> lowlevel.TrueNASClient:
+        if client is None:
+            raise RuntimeError("Request-scoped TrueNAS client is required")
+        return client
 
-    def validate_connectivity(self) -> None:
-        c = lowlevel.TrueNASMiddlewareClient()
-        c.connect()
-        c.close()
+    def validate_connectivity(self, client: lowlevel.TrueNASClient | None) -> None:
+        c = self._require_client(client)
+        c.call("system.version")
 
-    def list_datasets_with_snapshots(self) -> dict[str, Any]:
-        return lowlevel.list_datasets_with_snapshots()
+    def list_datasets_with_snapshots(self, client: lowlevel.TrueNASClient | None) -> dict[str, Any]:
+        c = self._require_client(client)
+        return lowlevel.list_datasets_with_snapshots(client=c)
 
-    def list_snapshots(self, dataset: str | None = None) -> list[dict[str, Any]]:
-        return lowlevel.list_snapshots(dataset)
+    def list_snapshots(self, dataset: str | None = None, client: lowlevel.TrueNASClient | None = None) -> list[dict[str, Any]]:
+        c = self._require_client(client)
+        return lowlevel.list_snapshots(dataset, client=c)
 
-    def rollback_snapshot(self, dataset: str, snapshot: str) -> Any:
-        res = lowlevel.rollback_snapshot(dataset, snapshot)
+    def rollback_snapshot(self, dataset: str, snapshot: str, client: lowlevel.TrueNASClient | None = None) -> Any:
+        c = self._require_client(client)
+        res = lowlevel.rollback_snapshot(dataset, snapshot, client=c)
         # snapshot set may have changed; invalidate cache for this dataset
         try:
             self._snapshot_cache.pop(dataset, None)
@@ -85,8 +86,9 @@ class ZfsService:
             pass
         return res
 
-    def clone_snapshot(self, dataset: str, snapshot: str, target: str) -> Any:
-        res = lowlevel.clone_snapshot(dataset, snapshot, target)
+    def clone_snapshot(self, dataset: str, snapshot: str, target: str, client: lowlevel.TrueNASClient | None = None) -> Any:
+        c = self._require_client(client)
+        res = lowlevel.clone_snapshot(dataset, snapshot, target, client=c)
         # Invalidate cache for the target dataset and source dataset
         try:
             self._snapshot_cache.pop(dataset, None)
@@ -98,57 +100,75 @@ class ZfsService:
             pass
         return res
 
-    def get_job(self, job_id: int) -> Any:
-        # Use the websocket middleware client via lowlevel helper
-        return lowlevel.get_job(job_id)
+    def get_job(self, job_id: int, client: lowlevel.TrueNASClient | None = None) -> Any:
+        c = self._require_client(client)
+        return lowlevel.get_job(job_id, client=c)
 
-    def get_pools_health(self) -> dict[str, str]:
-        return lowlevel.get_pools_health()
+    def get_pools_health(self, client: lowlevel.TrueNASClient | None = None) -> dict[str, str]:
+        c = self._require_client(client)
+        return lowlevel.get_pools_health(client=c)
 
-    def get_dataset_objects(self) -> list[dict[str, Any]]:
-        client = lowlevel.TrueNASMiddlewareClient()
-        try:
-            client.connect()
-            return client.call("zfs.dataset.query") or []
-        finally:
-            client.close()
+    def get_dataset_objects(self, client: lowlevel.TrueNASClient | None = None) -> list[dict[str, Any]]:
+        c = self._require_client(client)
+        return c.call("zfs.dataset.query") or []
 
-    def list_datasets(self) -> list[dict[str, Any]]:
+    def list_datasets(self, client: lowlevel.TrueNASClient | None = None) -> list[dict[str, Any]]:
         """Return raw dataset objects (alias for get_dataset_objects)."""
-        return self.get_dataset_objects()
+        return self.get_dataset_objects(client=client)
 
-    def build_pool_tree(self, datasets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def build_pool_tree(self, datasets: list[dict[str, Any]], client: lowlevel.TrueNASClient | None = None) -> list[dict[str, Any]]:
         """Build pools and annotate datasets with snapshot counts.
 
-        This method will call `list_snapshots` per dataset to populate
-        `snapshot_count` and `latest_snapshot` keys on each dataset dict.
+        Fetch snapshots once and compute per-dataset metadata in-memory to
+        avoid opening many websocket calls during a single page render.
         """
+        c = self._require_client(client)
         pools = {}
+        snapshot_meta: dict[str, dict[str, Any]] = {}
+
+        try:
+            now = time.time()
+            cached = self._snapshot_cache.get("__all__")
+            if cached and (now - cached[0]) < self._snapshot_ttl:
+                all_snaps = cached[1]
+            else:
+                all_snaps = self.list_snapshots(client=c) or []
+                self._snapshot_cache["__all__"] = (now, all_snaps)
+
+            for snap in all_snaps:
+                dataset_name = snap.get("dataset")
+                if not dataset_name:
+                    continue
+
+                created = snap.get("created_at") or datetime.min.replace(tzinfo=timezone.utc)
+                item = snapshot_meta.get(dataset_name)
+                if item is None:
+                    snapshot_meta[dataset_name] = {
+                        "count": 1,
+                        "latest_created": created,
+                        "latest_name": snap.get("snapshot_name"),
+                    }
+                    continue
+
+                item["count"] += 1
+                if created > item["latest_created"]:
+                    item["latest_created"] = created
+                    item["latest_name"] = snap.get("snapshot_name")
+        except Exception:
+            snapshot_meta = {}
 
         for ds in datasets:
             name = ds.get("name")
             if not name:
                 continue
             ds_copy = dict(ds)
-            # compute snapshot counts lazily; errors should not break page
-            try:
-                now = time.time()
-                cached = self._snapshot_cache.get(name)
-                if cached and (now - cached[0]) < self._snapshot_ttl:
-                    snaps = cached[1]
-                else:
-                    snaps = self.list_snapshots(name) or []
-                    self._snapshot_cache[name] = (now, snaps)
-
-                ds_copy["snapshot_count"] = len(snaps)
-                if snaps:
-                    snaps.sort(key=lambda x: x.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-                    ds_copy["latest_snapshot"] = snaps[0].get("snapshot_name")
-                else:
-                    ds_copy["latest_snapshot"] = None
-            except Exception:
+            meta = snapshot_meta.get(name)
+            if not meta:
                 ds_copy["snapshot_count"] = 0
                 ds_copy["latest_snapshot"] = None
+            else:
+                ds_copy["snapshot_count"] = meta.get("count", 0)
+                ds_copy["latest_snapshot"] = meta.get("latest_name")
 
             pool_name = name.split("/", 1)[0]
             pools.setdefault(pool_name, []).append(ds_copy)
@@ -161,7 +181,16 @@ class ZfsService:
             for pool in sorted(pools.keys())
         ]
 
-    def restore_path(self, dataset: str, snapshot: str, subpath: str, target_container_path: str, *, overwrite: bool = False) -> int:
+    def restore_path(
+        self,
+        dataset: str,
+        snapshot: str,
+        subpath: str,
+        target_container_path: str,
+        *,
+        overwrite: bool = False,
+        client: lowlevel.TrueNASClient | None = None,
+    ) -> int:
         """Schedule a middlewared job to copy from a snapshot path into the live dataset.
 
         Parameters:
@@ -172,6 +201,8 @@ class ZfsService:
 
         Returns the middleware job id (int) or raises on error.
         """
+        c = self._require_client(client)
+
         # build container source path
         sub = (subpath or "").lstrip("/")
         src_container_path = os.path.normpath(os.path.join("/data", dataset, ".zfs", "snapshot", snapshot, sub))
@@ -184,36 +215,36 @@ class ZfsService:
         src_host = container_to_host_path(src_container_path)
         dest_host = container_to_host_path(target_container_path)
 
-        client = lowlevel.TrueNASMiddlewareClient()
-        try:
-            client.connect()
-            result = client.call("filesystem.copy", src_host, dest_host, {"recursive": True, "preserve": True, "overwrite": overwrite})
-            job_id = None
-            if isinstance(result, dict) and "id" in result:
-                job_id = result.get("id")
-            elif isinstance(result, int):
-                job_id = result
-            else:
-                try:
-                    job_id = int(result)
-                except Exception:
-                    job_id = None
-
-            if job_id is None:
-                raise RuntimeError(f"middleware returned unexpected result for filesystem.copy: {result}")
-
-            return job_id
-        finally:
+        result = c.call("filesystem.copy", src_host, dest_host, {"recursive": True, "preserve": True, "overwrite": overwrite})
+        job_id = None
+        if isinstance(result, dict) and "id" in result:
+            job_id = result.get("id")
+        elif isinstance(result, int):
+            job_id = result
+        else:
             try:
-                client.close()
+                job_id = int(result)
             except Exception:
-                pass
+                job_id = None
+
+        if job_id is None:
+            raise RuntimeError(f"middleware returned unexpected result for filesystem.copy: {result}")
+
+        return job_id
 
     def get_dataset_space(self, dataset_objects: list[dict[str, Any]]) -> dict[str, Any]:
         return lowlevel.get_dataset_space(dataset_objects)
 
-    def snapshot_diff(self, dataset: str, a: str, b: str) -> dict[str, Any]:
-        return lowlevel.snapshot_diff(dataset, a, b)
+    def snapshot_diff(self, dataset: str, a: str, b: str, client: lowlevel.TrueNASClient | None = None) -> dict[str, Any]:
+        c = self._require_client(client)
+        return lowlevel.snapshot_diff(dataset, a, b, client=c)
 
-    def list_snapshot_files(self, dataset: str, snapshot: str, path: str = "") -> list[dict[str, Any]]:
-        return lowlevel.list_snapshot_files(dataset, snapshot, path)
+    def list_snapshot_files(
+        self,
+        dataset: str,
+        snapshot: str,
+        path: str = "",
+        client: lowlevel.TrueNASClient | None = None,
+    ) -> list[dict[str, Any]]:
+        c = self._require_client(client)
+        return lowlevel.list_snapshot_files(dataset, snapshot, path, client=c)

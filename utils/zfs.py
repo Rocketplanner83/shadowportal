@@ -1,105 +1,160 @@
 from datetime import datetime, timezone
 import json
+import logging
 import ssl
 import websocket
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class ZfsError(Exception):
     pass
 
 
-class TrueNASMiddlewareClient:
+class TrueNASClient:
     def __init__(self):
-        # Do not resolve WS URL at import/instance creation time to avoid
-        # raising when settings are not configured. The URL will be
-        # resolved in `connect()` after checking configuration.
         self.url = None
         self.ws = None
+        self.authed = False
         self._id = 0
 
     def _next_id(self):
         self._id += 1
         return self._id
 
+    def _send_json(self, payload):
+        self.ws.send(json.dumps(payload))
+
+    def _recv_json(self):
+        return json.loads(self.ws.recv())
+
+    def _recv_until(self, *, expected_msg=None, expected_id=None):
+        while True:
+            msg = self._recv_json()
+
+            if msg.get("msg") == "ping":
+                self._send_json({"msg": "pong"})
+                continue
+
+            if expected_msg and msg.get("msg") != expected_msg:
+                continue
+
+            if expected_id is not None and msg.get("id") != expected_id:
+                continue
+
+            return msg
+
     def connect(self):
+        if self.ws:
+            return
+
+        from config import is_configured
+
+        if not is_configured():
+            raise ZfsError("TrueNAS middleware not configured")
+
+        self.url = settings.TRUENAS_WS_URL
+
+        sslopt = None
+        if not settings.TRUENAS_VERIFY_TLS:
+            sslopt = {"cert_reqs": ssl.CERT_NONE}
+
+        logger.info("WS connect start url=%s", self.url)
+
         try:
-            # Ensure TrueNAS connection configuration is present
-            from config import is_configured
-            if not is_configured():
-                raise ZfsError("TrueNAS middleware not configured")
-
-            self.url = settings.TRUENAS_WS_URL
-
-            sslopt = None
-            if not settings.TRUENAS_VERIFY_TLS:
-                sslopt = {"cert_reqs": ssl.CERT_NONE}
-
             self.ws = websocket.create_connection(
                 self.url,
                 timeout=10,
                 sslopt=sslopt,
             )
 
-            self.ws.send(json.dumps({
+            self._send_json({
                 "msg": "connect",
                 "version": "1",
                 "support": ["1"],
-            }))
+            })
 
-            handshake = json.loads(self.ws.recv())
+            handshake = self._recv_until(expected_msg="connected")
             if handshake.get("msg") != "connected":
                 raise ZfsError(f"Middleware handshake failed: {handshake}")
 
-            login_id = self._next_id()
-            self.ws.send(json.dumps({
-                "id": login_id,
-                "msg": "method",
-                "method": "auth.login_with_api_key",
-                "params": [settings.TRUENAS_API_KEY],
-            }))
+            self._authenticate()
+            logger.info("WS connect+auth success")
+        except Exception:
+            self.close()
+            raise
 
-            resp = json.loads(self.ws.recv())
-            if resp.get("error"):
-                raise ZfsError(f"TrueNAS auth error: {resp}")
-            if resp.get("result") is not True:
-                raise ZfsError(f"TrueNAS auth rejected: {resp}")
+    def _authenticate(self):
+        if self.authed:
+            return
 
-        except Exception as e:
-            raise ZfsError(str(e))
+        api_key = settings.TRUENAS_API_KEY
+        if not api_key:
+            raise ZfsError("TRUENAS_API_KEY is not configured")
+
+        login_id = self._next_id()
+        frame = {
+            "id": login_id,
+            "msg": "method",
+            "method": "auth.login_with_api_key",
+            "params": [api_key],
+        }
+        self._send_json(frame)
+
+        resp = self._recv_until(expected_msg="result", expected_id=login_id)
+        if resp.get("error"):
+            raise ZfsError(f"TrueNAS auth error: {resp}")
+        if resp.get("result") is not True:
+            raise ZfsError(f"TrueNAS auth rejected: {resp}")
+
+        self.authed = True
 
     def call(self, method, *params):
-        try:
-            req_id = self._next_id()
-            self.ws.send(json.dumps({
-                "id": req_id,
-                "msg": "method",
-                "method": method,
-                "params": list(params),
-            }))
-            resp = json.loads(self.ws.recv())
-            if resp.get("error"):
-                raise ZfsError(resp["error"])
-            return resp.get("result")
-        except Exception as e:
-            raise ZfsError(str(e))
+        if self.ws is None:
+            raise ZfsError("Client not connected")
+        if not self.authed:
+            raise ZfsError("Client not authenticated")
+
+        req_id = self._next_id()
+        self._send_json({
+            "id": req_id,
+            "msg": "method",
+            "method": method,
+            "params": list(params),
+        })
+
+        resp = self._recv_until(expected_msg="result", expected_id=req_id)
+        if resp.get("error"):
+            raise ZfsError(resp["error"])
+        return resp.get("result")
 
     def subscribe(self, collection, sub_id):
-        self.ws.send(json.dumps({
+        if self.ws is None:
+            raise ZfsError("Client not connected")
+        if not self.authed:
+            raise ZfsError("Client not authenticated")
+        self._send_json({
             "id": self._next_id(),
             "msg": "sub",
             "name": collection,
             "id": sub_id,
-        }))
+        })
 
     def unsubscribe(self, sub_id):
-        self.ws.send(json.dumps({
+        if self.ws is None:
+            raise ZfsError("Client not connected")
+        if not self.authed:
+            raise ZfsError("Client not authenticated")
+        self._send_json({
             "id": self._next_id(),
             "msg": "unsub",
             "id": sub_id,
-        }))
+        })
 
     def recv(self):
+        if self.ws is None:
+            raise ZfsError("Client not connected")
         return json.loads(self.ws.recv())
 
     def close(self):
@@ -108,12 +163,27 @@ class TrueNASMiddlewareClient:
                 self.ws.close()
             except Exception:
                 pass
+            finally:
+                logger.info("WS closed")
+        self.ws = None
+        self.authed = False
 
 
-def list_snapshots(dataset=None):
-    client = TrueNASMiddlewareClient()
+# Backward-compatible alias for existing imports.
+TrueNASMiddlewareClient = TrueNASClient
+
+
+def _ensure_client(client=None):
+    if client is not None:
+        return client, False
+    created = TrueNASClient()
+    created.connect()
+    return created, True
+
+
+def list_snapshots(dataset=None, client=None):
+    client, should_close = _ensure_client(client)
     try:
-        client.connect()
         filters = []
         if dataset:
             filters = [["dataset", "=", dataset]]
@@ -135,13 +205,13 @@ def list_snapshots(dataset=None):
 
         return snaps
     finally:
-        client.close()
+        if should_close:
+            client.close()
 
 
-def list_datasets_with_snapshots():
-    client = TrueNASMiddlewareClient()
+def list_datasets_with_snapshots(client=None):
+    client, should_close = _ensure_client(client)
     try:
-        client.connect()
         datasets = client.call("zfs.dataset.query") or []
         snapshots = client.call("zfs.snapshot.query") or []
 
@@ -164,44 +234,45 @@ def list_datasets_with_snapshots():
 
         return pools
     finally:
-        client.close()
+        if should_close:
+            client.close()
 
 
-def rollback_snapshot(dataset, snapshot):
-    client = TrueNASMiddlewareClient()
+def rollback_snapshot(dataset, snapshot, client=None):
+    client, should_close = _ensure_client(client)
     try:
-        client.connect()
         return client.call("zfs.snapshot.rollback", f"{dataset}@{snapshot}")
     finally:
-        client.close()
+        if should_close:
+            client.close()
 
 
-def clone_snapshot(dataset, snapshot, target):
-    client = TrueNASMiddlewareClient()
+def clone_snapshot(dataset, snapshot, target, client=None):
+    client, should_close = _ensure_client(client)
     try:
-        client.connect()
         return client.call("zfs.snapshot.clone", f"{dataset}@{snapshot}", target)
     finally:
-        client.close()
+        if should_close:
+            client.close()
 
 
-def get_job(job_id):
-    client = TrueNASMiddlewareClient()
+def get_job(job_id, client=None):
+    client, should_close = _ensure_client(client)
     try:
-        client.connect()
         return client.call("core.get_jobs", [["id", "=", job_id]])
     finally:
-        client.close()
+        if should_close:
+            client.close()
 
 
-def get_pools_health():
-    client = TrueNASMiddlewareClient()
+def get_pools_health(client=None):
+    client, should_close = _ensure_client(client)
     try:
-        client.connect()
         pools = client.call("pool.query") or []
         return {p.get("name"): p.get("status", "UNKNOWN") for p in pools}
     finally:
-        client.close()
+        if should_close:
+            client.close()
 
 
 def validate_restore_paths(source_path: str, target_path: str):
@@ -250,10 +321,9 @@ def get_dataset_space(dataset_objects):
     return results
 
 
-def snapshot_diff(dataset, a, b):
-    client = TrueNASMiddlewareClient()
+def snapshot_diff(dataset, a, b, client=None):
+    client, should_close = _ensure_client(client)
     try:
-        client.connect()
         result = client.call(
             "zfs.snapshot.get_diff",
             f"{dataset}@{a}",
@@ -261,62 +331,36 @@ def snapshot_diff(dataset, a, b):
         )
         return result or {"added": [], "removed": [], "modified": []}
     finally:
-        client.close()
+        if should_close:
+            client.close()
 
 
-def list_snapshot_files(dataset, snapshot, path=""):
-    import os
-
-    # Prevent leading slashes from causing os.path.join to ignore base_path
-    path = path.lstrip("/")
-
-    base_path = os.path.join(
-        "/data",
-        dataset,
-        ".zfs",
-        "snapshot",
-        snapshot,
-    )
-
-    # Normalize incoming subpath: treat empty or '/' as the snapshot root,
-    # and strip any leading slashes so os.path.join doesn't ignore base_path.
-    if not path or path == "/":
-        rel_path = ""
+def list_snapshot_files(dataset, snapshot, path="", client=None):
+    base = f"/mnt/{dataset}/.zfs/snapshot/{snapshot}"
+    if path:
+        middleware_path = f"{base}/{path}"
     else:
-        rel_path = path.lstrip("/")
+        middleware_path = base
 
-    safe_path = os.path.normpath(os.path.join(base_path, rel_path))
-
-    # Resolve real paths and ensure containment using commonpath to avoid
-    # directory escape via symlinks or ../ segments.
-    base_real = os.path.realpath(base_path)
-    safe_real = os.path.realpath(safe_path)
-
+    client, should_close = _ensure_client(client)
     try:
-        common = os.path.commonpath([base_real, safe_real])
-    except Exception:
-        raise ZfsError("Invalid snapshot path")
+        try:
+            entries = client.call("filesystem.listdir", middleware_path)
+        except ZfsError as e:
+            raise ZfsError(str(e))
 
-    if common != base_real:
-        raise ZfsError("Invalid snapshot path")
+        if not isinstance(entries, list):
+            raise ZfsError(f"Unexpected filesystem.listdir result: {entries!r}")
 
-    if not os.path.exists(safe_real):
-        raise ZfsError(f"Snapshot path does not exist: {safe_real}")
+        # Preserve middleware response while adding view-friendly fields.
+        for entry in entries:
+            t = (entry.get("type") or "").upper()
+            entry["is_dir"] = t == "DIRECTORY"
+            if entry["is_dir"]:
+                entry["size"] = None
 
-    entries = []
-    try:
-        names = os.listdir(safe_real)
-    except OSError as e:
-        raise ZfsError(f"Unable to list snapshot path: {e}")
-
-    for name in names:
-        full_real = os.path.join(safe_real, name)
-        entries.append({
-            "name": name,
-            "is_dir": os.path.isdir(full_real),
-            "size": os.path.getsize(full_real) if os.path.isfile(full_real) else None,
-        })
-
-    entries.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
-
-    return entries
+        entries.sort(key=lambda x: (not x.get("is_dir", False), str(x.get("name", "")).lower()))
+        return entries
+    finally:
+        if should_close:
+            client.close()
