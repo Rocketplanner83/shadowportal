@@ -16,7 +16,9 @@
     </label>
     <a class="snap-name" href="{{ url_for('browse_snapshot', dataset=dataset, snapshot=snap.snapshot_name, subpath='') }}" onclick="event.stopPropagation();">{{ snap.snapshot_name }}</a>
     <span class="badge">{{ snap.age }}</span>
+    {% if backend_caps.jobs %}
     <span class="job-indicator" data-job="" aria-live="polite"></span>
+    {% endif %}
   </div>
 
   <div class="snapshot-detail">
@@ -27,14 +29,18 @@
       <a class="btn" href="{{ url_for('browse_snapshot', dataset=dataset, snapshot=snap.snapshot_name, subpath='') }}">Browse</a>
 
       {% if role == 'admin' %}
+      {% if backend_caps.jobs %}
       <form class="ajax" data-confirm="Rollback dataset to {{ snap.snapshot_name }}?" data-danger="high" method="POST" action="{{ url_for('rollback', dataset=dataset, snapshot=snap.snapshot_name) }}">
         <button class="btn danger" type="submit">Rollback</button>
       </form>
+      {% endif %}
 
+      {% if backend_caps.jobs %}
       <form class="ajax" data-confirm="Clone {{ snap.snapshot_name }} to target dataset" data-danger="medium" method="POST" action="{{ url_for('clone', dataset=dataset, snapshot=snap.snapshot_name) }}">
         <input class="input" name="target" placeholder="target dataset (e.g. dagda/foo_clone)">
         <button class="btn" type="submit">Clone</button>
       </form>
+      {% endif %}
       {% else %}
         <div class="muted">Viewer role; actions disabled.</div>
       {% endif %}

@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import shutil
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, session, Response, jsonify, send_file, abort, g
@@ -7,10 +9,15 @@ from flask_caching import Cache
 
 from config import settings
 from utils.zfs import ZfsError, validate_restore_paths, TrueNASClient
-from services.zfs_service import ZfsService
+from services.service_factory import get_service
 
 # single service instance used by routes
-zfs_service = ZfsService()
+zfs_service = get_service()
+logging.info(
+    "ShadowPortal backend initialized: %s | capabilities=%s",
+    zfs_service.__class__.__name__,
+    zfs_service.capabilities(),
+)
 
 # ---- CRITICAL: Gunicorn expects module-level variable named "app" ----
 app = Flask(__name__)
@@ -34,6 +41,15 @@ __all__ = ["app"]
 app.config["CACHE_TYPE"] = "SimpleCache"
 app.config["CACHE_DEFAULT_TIMEOUT"] = int(os.getenv("CACHE_DEFAULT_TIMEOUT", 60))
 cache = Cache(app)
+
+
+@app.context_processor
+def inject_backend_info():
+    caps = zfs_service.capabilities()
+    return {
+        "backend_name": zfs_service.__class__.__name__.replace("ZFSService", ""),
+        "backend_caps": caps,
+    }
 
 
 def validate_truenas_connectivity(client: TrueNASClient):
@@ -194,6 +210,58 @@ def health():
         return {"ok": True, "truenas": "ok"}
     except Exception as e:
         return {"ok": False, "truenas": "error", "error": str(e)}, 503
+
+
+@app.route("/backend-info")
+def backend_info():
+    return jsonify(
+        {
+            "backend_class": zfs_service.__class__.__name__,
+            "backend_module": zfs_service.__class__.__module__,
+            "capabilities": zfs_service.capabilities(),
+        }
+    )
+
+
+@app.route("/backend-health")
+def backend_health():
+    backend_name = zfs_service.__class__.__name__
+    caps = zfs_service.capabilities()
+
+    if "TrueNAS" in backend_name:
+        if not os.getenv("TRUENAS_WS_URL"):
+            return {
+                "status": "error",
+                "backend": backend_name,
+                "capabilities": caps,
+                "error": "TRUENAS_WS_URL not configured",
+            }, 500
+        return {
+            "status": "ok",
+            "backend": backend_name,
+            "capabilities": caps,
+        }, 200
+
+    if "Generic" in backend_name:
+        if not shutil.which("zfs"):
+            return {
+                "status": "error",
+                "backend": backend_name,
+                "capabilities": caps,
+                "error": "zfs binary not found",
+            }, 500
+        return {
+            "status": "ok",
+            "backend": backend_name,
+            "capabilities": caps,
+        }, 200
+
+    return {
+        "status": "error",
+        "backend": backend_name,
+        "capabilities": caps,
+        "error": "Unknown backend",
+    }, 500
 
 
 @app.route("/logout")

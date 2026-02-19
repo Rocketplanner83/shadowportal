@@ -36,6 +36,14 @@
 <main class="container">
 {% block content %}{% endblock %}
 </main>
+<footer style="font-size: 0.8em; opacity: 0.6; text-align: center; margin-top: 20px;">
+    Backend: {{ backend_name }}
+    {% if backend_caps.jobs %}
+        (jobs enabled)
+    {% else %}
+        (no job tracking)
+    {% endif %}
+</footer>
 <script src="/static/app.js"></script>
 </body>
 </html>
