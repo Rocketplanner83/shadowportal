@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 class="page-title">{{ dataset }}</h2>
+
+<div class="toolbar">
+  <div class="hint">Select two snapshots to diff.</div>
+  <button class="btn" id="diffBtn" disabled onclick="openDiff('{{ dataset }}')">Diff selected</button>
+</div>
+
+{% for snap in snapshots %}
+<div class="snapshot-card" data-snap="{{ snap.snapshot_name }}">
+  <div class="snapshot-row" onclick="toggleSnapshot(this)">
+    <label class="check" onclick="event.stopPropagation();">
+      <input type="checkbox" class="diff-check" onchange="diffSelectionChanged()">
+      <span></span>
+    </label>
+    <a class="snap-name" href="{{ url_for('browse_snapshot', dataset=dataset, snapshot=snap.snapshot_name, subpath='') }}" onclick="event.stopPropagation();">{{ snap.snapshot_name }}</a>
+    <span class="badge">{{ snap.age }}</span>
+    <span class="job-indicator" data-job="" aria-live="polite"></span>
+  </div>
+
+  <div class="snapshot-detail">
+    <div class="mono">{{ snap.full_name }}</div>
+    <div class="muted">{{ snap.created_at }}</div>
+
+    <div class="actions">
+      <a class="btn" href="{{ url_for('browse_snapshot', dataset=dataset, snapshot=snap.snapshot_name, subpath='') }}">Browse</a>
+
+      {% if role == 'admin' %}
+      <form class="ajax" data-confirm="Rollback dataset to {{ snap.snapshot_name }}?" data-danger="high" method="POST" action="{{ url_for('rollback', dataset=dataset, snapshot=snap.snapshot_name) }}">
+        <button class="btn danger" type="submit">Rollback</button>
+      </form>
+
+      <form class="ajax" data-confirm="Clone {{ snap.snapshot_name }} to target dataset" data-danger="medium" method="POST" action="{{ url_for('clone', dataset=dataset, snapshot=snap.snapshot_name) }}">
+        <input class="input" name="target" placeholder="target dataset (e.g. dagda/foo_clone)">
+        <button class="btn" type="submit">Clone</button>
+      </form>
+      {% else %}
+        <div class="muted">Viewer role; actions disabled.</div>
+      {% endif %}
+    </div>
+
+    <div class="op-status"></div>
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,39 @@
+services:
+  shadowportal:
+    build: .
+    container_name: shadowportal
+
+    # Share host network namespace so 127.0.0.1 resolves to TrueNAS middleware
+    network_mode: host
+
+    environment:
+      PORT: "8799"
+
+      # Hard-set TrueNAS connection (no shell substitution)
+      TRUENAS_URL: "http://127.0.0.1:6000"
+      TRUENAS_WS_URL: "ws://127.0.0.1:6000/websocket"
+      TRUENAS_API_KEY: "3-PTqr1GdB7hkyWftm1nsNNeiaLa5Muxde91iTIeHNrGMOg9FoywSSPDRMeb1B3s6dY"
+      TRUENAS_VERIFY_TLS: "false"
+
+      CACHE_DEFAULT_TIMEOUT: "30"
+      FLASK_SECRET_KEY: "${FLASK_SECRET_KEY}"
+      SHADOWPORTAL_ADMIN_PASSWORD_HASH: "${SHADOWPORTAL_ADMIN_PASSWORD_HASH}"
+      SHADOWPORTAL_VIEWER_PASSWORD_HASH: "${SHADOWPORTAL_VIEWER_PASSWORD_HASH}"
+      SHADOWPORTAL_AUDIT_LOG: "/tmp/shadowportal_audit.jsonl"
+
+    volumes:
+      - /mnt:/data:ro
+
+    tmpfs:
+      - /tmp:size=64m
+
+    mem_limit: 256m
+    cpus: "0.50"
+
+    security_opt:
+      - no-new-privileges:true
+
+    cap_drop:
+      - ALL
+
+    restart: unless-stopped

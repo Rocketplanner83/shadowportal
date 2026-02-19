@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 class="page-title">Diff: {{ dataset }}</h2>
+<div class="muted">{{ a }} vs {{ b }}</div>
+
+<div class="diff-grid">
+  <div class="diff-col">
+    <h3>Added ({{ diff.added|length }})</h3>
+    <ul class="diff-list">{% for p in diff.added %}<li class="added">{{ p }}</li>{% endfor %}</ul>
+  </div>
+  <div class="diff-col">
+    <h3>Removed ({{ diff.removed|length }})</h3>
+    <ul class="diff-list">{% for p in diff.removed %}<li class="removed">{{ p }}</li>{% endfor %}</ul>
+  </div>
+  <div class="diff-col">
+    <h3>Modified ({{ diff.modified|length }})</h3>
+    <ul class="diff-list">{% for p in diff.modified %}<li class="modified">{{ p }}</li>{% endfor %}</ul>
+  </div>
+</div>
+{% endblock %}
+```html
+{% extends "base.html" %}
+{% block content %}
+<h2 class="page-title">Diff: {{ dataset }}</h2>
+<div class="muted">{{ diff.a }} vs {{ diff.b }}</div>
+
+<div class="diff-grid">
+  <div class="diff-col">
+    <h3>Added ({{ diff.added|length }})</h3>
+    <ul class="diff-list">{% for p in diff.added %}<li class="added">{{ p }}</li>{% endfor %}</ul>
+  </div>
+  <div class="diff-col">
+    <h3>Removed ({{ diff.removed|length }})</h3>
+    <ul class="diff-list">{% for p in diff.removed %}<li class="removed">{{ p }}</li>{% endfor %}</ul>
+  </div>
+  <div class="diff-col">
+    <h3>Modified ({{ diff.modified|length }})</h3>
+    <ul class="diff-list">{% for p in diff.modified %}<li class="modified">{{ p }}</li>{% endfor %}</ul>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="container">
+    <a href="/browse/{{ dataset }}/{{ snapshot }}" class="back-link">
+        ← Back to snapshot
+    </a>
+
+    <h1>Search Snapshot</h1>
+
+    <form method="get" class="search-form">
+        <input
+            type="text"
+            name="q"
+            value="{{ query }}"
+            placeholder="Search filename..."
+            required
+        >
+        <button type="submit">Search</button>
+    </form>
+
+    {% if query %}
+        <div class="card">
+            <h2>Results for "{{ query }}"</h2>
+
+            {% if results %}
+                <ul class="file-list">
+                    {% for path in results %}
+                        <li>
+                            <a href="/browse/{{ dataset }}/{{ snapshot }}?path={{ path }}">
+                                {{ path }}
+                            </a>
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p class="empty">No matches found.</p>
+            {% endif %}
+        </div>
+    {% endif %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,68 @@
+# =========================
+# FILE: templates/browse.html
+# =========================
+{% extends "base.html" %}
+{% block title %}ShadowPortal · Browse{% endblock %}
+
+{% block content %}
+  <div class="breadcrumbs">
+    <a class="link" href="{{ url_for('dataset_view') }}?name={{ dataset }}">← Snapshots</a>
+  </div>
+
+  <section class="hero">
+    <div class="hero-row">
+      <div class="hero-pill" title="{{ dataset }}">{{ dataset }}</div>
+      <div class="hero-pill hero-pill-sub" title="{{ snapshot }}">{{ snapshot }}</div>
+    </div>
+
+    {% if rel %}
+      <div class="muted">Path: <span class="mono">{{ rel }}</span></div>
+    {% else %}
+      <div class="muted">Root of snapshot.</div>
+    {% endif %}
+
+    <div class="actions">
+      {% if parent_rel is not none %}
+        {% if rel %}
+          <a class="btn btn-ghost" href="{{ url_for('browse_snapshot', dataset=dataset, snapshot=snapshot, subpath=parent_rel) }}">Up</a>
+        {% endif %}
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card">
+    <h2 class="card-title">Contents</h2>
+
+    {% if not entries %}
+      <p class="muted">This directory is empty or not accessible.</p>
+    {% else %}
+      <div class="table">
+        <div class="table-head">
+          <div>Name</div>
+          <div class="right">Size</div>
+          <div class="right">Action</div>
+        </div>
+
+        {% for e in entries %}
+          <div class="table-row">
+            <div class="name mono">
+              {% if e.is_dir %}
+                <a class="link" href="{{ url_for('browse_snapshot', dataset=dataset, snapshot=snapshot, subpath=e.rel) }}">📁 {{ e.name }}</a>
+              {% else %}
+                <span>📄 {{ e.name }}</span>
+              {% endif %}
+            </div>
+            <div class="right mono">{{ e.size }}</div>
+            <div class="right">
+              {% if not e.is_dir %}
+                <a class="btn" href="{{ url_for('download_snapshot_file', dataset=dataset, snapshot=snapshot, filepath=e.rel) }}">Download</a>
+              {% else %}
+                <span class="muted">–</span>
+              {% endif %}
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </section>
+{% endblock %}

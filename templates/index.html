@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+{% for pool in pools %}
+<details class="pool-group">
+  <summary class="pool-header">
+    <strong>{{ pool.name }}</strong>
+    <span class="badge muted">
+      {{ pool.datasets|length }} datasets
+    </span>
+  </summary>
+
+  {% for ds in pool.datasets %}
+  <div class="dataset-row">
+    <div class="dataset-left">
+      <span class="dataset-name">{{ ds.name }}</span>
+    </div>
+
+    <div class="dataset-right">
+      <span class="badge">
+        {{ ds.snapshot_count|default(0) }} snapshots
+      </span>
+
+      <a class="btn"
+         href="{{ url_for('dataset_view') }}?name={{ ds.name }}">
+         Open
+      </a>
+    </div>
+  </div>
+  {% endfor %}
+</details>
+{% endfor %}
+
+{% if role == 'admin' %}
+  <div class="audit-link"><a class="link" href="/audit">Audit log</a></div>
+{% endif %}
+{% endblock %}
