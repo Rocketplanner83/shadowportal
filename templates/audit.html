@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 class="page-title">Audit Log</h2>
+<table class="audit">
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>User</th>
+      <th>Role</th>
+      <th>Action</th>
+      <th>Details</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td class="mono">{{ r.ts }}</td>
+      <td>{{ r.user }}</td>
+      <td>{{ r.role }}</td>
+      <td>{{ r.action }}</td>
+      <td class="mono small">{{ r.details }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

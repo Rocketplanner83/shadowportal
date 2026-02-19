@@ -1,0 +1,22 @@
+services:
+  shadowportal:
+    build: .
+    container_name: shadowportal
+    ports:
+      - "8799:8799"
+    environment:
+      - PORT=8799
+      - ZFS_BACKEND=cli
+      - ZFS_BIN=zfs
+      - SNAPSHOT_ROOT=/data
+      - CACHE_DEFAULT_TIMEOUT=60
+    volumes:
+      - /mnt:/data:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped

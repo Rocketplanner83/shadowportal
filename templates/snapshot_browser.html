@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2 class="page-title">Snapshot Browser</h2>
+<div class="muted"><span class="mono">{{ dataset }}</span> @ <span class="mono">{{ snapshot }}</span></div>
+
+<nav class="crumbs">
+  <a class="link" href="{{ url_for('browse_snapshot', dataset=dataset, snapshot=snapshot, subpath='') }}">root</a>
+  {% for name, path in breadcrumbs %}
+    <span class="muted">/</span>
+    <a class="link" href="{{ url_for('browse_snapshot', dataset=dataset, snapshot=snapshot, subpath=path) }}">{{ name }}</a>
+  {% endfor %}
+</nav>
+
+<table class="browser">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Size</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for e in entries %}
+    <tr>
+      <td class="mono">
+        {% if e.is_dir %}
+          <a class="link" href="{{ url_for('browse_snapshot', dataset=dataset, snapshot=snapshot, subpath=(current_path + '/' + e.name) if current_path else e.name) }}">{{ e.name }}/</a>
+        {% else %}
+          {{ e.name }}
+        {% endif %}
+      </td>
+      <td>{{ 'Directory' if e.is_dir else 'File' }}</td>
+      <td>{{ (e.size or 0) | filesizeformat if not e.is_dir else '-' }}</td>
+      <td>
+        {% if not e.is_dir %}
+          <a class="btn" href="{{ url_for('download_snapshot_file', dataset=dataset, snapshot=snapshot, filepath=(current_path + '/' + e.name) if current_path else e.name) }}">Download</a>
+          {% if role == 'admin' %}
+            <button class="btn" type="button" onclick="restoreFile('{{ dataset }}','{{ snapshot }}','{{ (current_path + '/' + e.name) if current_path else e.name }}', this)">Restore</button>
+          {% endif %}
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<div id="restoreToast" class="toast hidden"></div>
+
+<script>
+async function restoreFile(dataset, snapshot, path, btn){
+  if(btn) btn.disabled = true;
+  try{
+    const res = await fetch('/restore-file', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json','X-Requested-With':'XMLHttpRequest'},
+      body: JSON.stringify({dataset, snapshot, path})
+    });
+    const data = await res.json().catch(()=>({ok:false,error:'Bad JSON'}));
+    showToast(data.ok ? 'Restored' : (data.error || 'Restore failed'));
+  }catch(e){
+    showToast('Restore failed');
+  }finally{
+    if(btn) btn.disabled = false;
+  }
+}
+function showToast(msg){
+  const t=document.getElementById('restoreToast');
+  if(!t) return;
+  t.textContent=msg;
+  t.classList.remove('hidden');
+  setTimeout(()=>t.classList.add('hidden'), 2200);
+}
+</script>
+
+{% endblock %}
